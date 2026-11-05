@@ -2,6 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kalender-Tool: .ics bearbeiten</title>
   <style>
     body {
@@ -31,9 +32,14 @@
       cursor: pointer;
       font-size: 16px;
       margin: 10px 0;
+      width: 100%;
+      box-sizing: border-box;
     }
     button:hover {
       background: #0052a3;
+    }
+    input[type="file"] {
+      background: #0066cc;
     }
     #result {
       margin-top: 20px;
@@ -51,15 +57,22 @@
       margin-bottom: 15px;
       border: 1px solid #ccc;
       border-radius: 4px;
+      box-sizing: border-box;
+    }
+    #status {
+      margin-top: 5px;
+      color: #333;
+      font-size: 14px;
     }
   </style>
 </head>
 <body>
   <h1>Kalender-Tool: .ics bearbeiten</h1>
-  <p>Lade eine .ics-Datei hoch, wähle einen Termin aus und passe beliebige Felder an (z.B. Location, Beschreibung). Die aktualisierte Datei wird als Download bereitgestellt.</p>
+  <p>Lade eine .ics-Datei hoch, wähle einen Termin aus und passe Location oder Beschreibung an. Die aktualisierte Datei wird als Download bereitgestellt.</p>
 
   <label for="file">.ics-Datei hochladen:</label>
-  <input type="file" id="file" accept=".ics" required />
+  <input type="file" id="file" accept=".ics,text/calendar" required />
+  <div id="status"></div>
 
   <div id="termine-container" class="hidden">
     <label for="termine">Termin auswählen:</label>
@@ -67,122 +80,190 @@
       <option value="" disabled selected>— Termin wählen —</option>
     </select>
 
-    <label for="location">Neue Location (optional):</label>
+    <label for="location">Neue Location (optional, überschreibt die Location des gewählten Termins):</label>
     <input type="text" id="location" placeholder="z.B. Gerätehaus, Neue Bahnhofstraße">
 
-    <label for="description">Neue Beschreibung (optional):</label>
-    <input type="text" id="description" placeholder="z.B. Medic-Sonderdienst 2027">
+    <label for="description">Neue Beschreibung (optional, überschreibt DESCRIPTION):</label>
+    <input type="text" id="description" placeholder="z.B. Leerungserinnerung">
 
-    <button onclick="generateUpdatedIcs()">Aktualisierte .ics generieren & herunterladen</button>
+    <button onclick="generateUpdatedIcs()">Aktualisierte .ics generieren &amp; herunterladen</button>
   </div>
 
   <div id="result" class="hidden">
-    <p><strong>Fertig!</strong> Die aktualisierte .ics-Datei wurde generiert. Speichere sie und teile sie per WhatsApp oder E-Mail.</p>
+    <p><strong>Fertig!</strong> Die aktualisierte .ics-Datei wurde generiert und heruntergeladen. Du kannst sie jetzt per WhatsApp oder E-Mail teilen.</p>
   </div>
 
   <script>
-    document.getElementById('file').addEventListener('change', function(e) {
-      const file = e.target.files[0];
-      if (!file) return;
+    'use strict';
 
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        const content = e.target.result;
-        const events = parseIcs(content);
+    let icsContent = '';      // Originalinhalt der hochgeladenen Datei
+    let icsFileName = '';     // Originaldateiname
+    let icsEol = '\r\n';     // Zeilenenden der Originaldatei ( bleiben erhalten )
 
-        const select = document.getElementById('termine');
-        select.innerHTML = '<option value="" disabled selected>— Termin wählen —</option>';
+    // ---------- Hilfsfunktionen ----------
 
-        events.forEach((event, index) => {
-          const option = document.createElement('option');
-          option.value = index;
-          option.textContent = `${event.start} – ${event.summary}`;
-          select.appendChild(option);
-        });
+    // Escapt Sonderzeichen gemäß iCalendar-Spezifikation ( RFC 5545 )
+    function escapeIcsValue(s) {
+      return s
+        .replace(/\\/g, '\\\\')
+        .replace(/;/g, '\\;')
+        .replace(/,/g, '\\,')
+        .replace(/\n/g, '\\n');
+    }
 
-        document.getElementById('termine-container').classList.remove('hidden');
-      };
-      reader.readAsText(file);
-    });
+    // Aktueller Zeitstempel im UTC-Format YYYYMMDDTHHMMSSZ
+    function currentTimestamp() {
+      const d = new Date();
+      const p = n => String(n).padStart(2, '0');
+      return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) +
+             'T' + p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + 'Z';
+    }
 
-    function parseIcs(content) {
+    // ---------- Termine parsen ----------
+
+    function parseIcs(content, eol) {
       const events = [];
-      const lines = content.split('\n');
-      let currentEvent = null;
+      const lines = content.split(/\r?\n/);
+      let current = null;
 
-      for (const line of lines) {
+      for (const raw of lines) {
+        const line = raw.replace(/\r$/, '');
+
         if (line.startsWith('BEGIN:VEVENT')) {
-          currentEvent = { start: '', summary: '' };
-        } else if (line.startsWith('DTSTART')) {
-          const match = line.match(/DTSTART;TZID=.*?:(\d{8}T\d{6})/);
-          if (match) {
-            const date = match[1];
-            currentEvent.start = `${date.substring(6,8)}.${date.substring(4,6)}.${date.substring(0,4)}`;
+          current = { start: '', summary: '' };
+          continue;
+        }
+        if (line.startsWith('END:VEVENT')) {
+          if (current) events.push(current);
+          current = null;
+          continue;
+        }
+        if (!current) continue;
+
+        // DTSTART in allen Varianten:
+        //   DTSTART;VALUE=DATE:20270113                 ( Ganztägig )
+        //   DTSTART;TZID=Europe/Berlin:20270427T110000 ( mit Zeitzone )
+        //   DTSTART:20270427T110000Z                   ( UTC )
+        if (/^DTSTART(;[^:]*)?:/.test(line)) {
+          const value = line.substring(line.lastIndexOf(':') + 1).trim();
+          let m = value.match(/^(\d{4})(\d{2})(\d{2})$/);            // nur Datum
+          if (m) {
+            current.start = m[3] + '.' + m[2] + '.' + m[1];
+          } else {
+            m = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/); // Datum + Zeit
+            if (m) current.start = m[3] + '.' + m[2] + '.' + m[1] + ' ' + m[4] + ':' + m[5];
           }
-        } else if (line.startsWith('SUMMARY:')) {
-          currentEvent.summary = line.substring(8);
-        } else if (line.startsWith('END:VEVENT')) {
-          events.push(currentEvent);
-          currentEvent = null;
+          continue;
+        }
+
+        // SUMMARY mit optionalen Parametern: SUMMARY:... oder SUMMARY;LANGUAGE=de:...
+        if (/^SUMMARY(;[^:]*)?:/.test(line)) {
+          current.summary = line.substring(line.indexOf(':') + 1).replace(/\\,/g, ',').replace(/\\;/g, ';').trim();
+          continue;
         }
       }
       return events;
     }
 
+    // ---------- Datei ändern ----------
+
+    function updateIcsFields(content, eol, index, newLocation, newDescription) {
+      const lines = content.split(/\r?\n/);
+      const stamp = currentTimestamp();
+      const idx = parseInt(index, 10);
+      const wantChanges = (newLocation !== '' || newDescription !== '');
+      let current = -1;
+
+      const out = lines.map(line => {
+        if (line.startsWith('BEGIN:VEVENT')) current++;
+        if (current !== idx) return line;
+
+        // LOCATION: Wert ersetzen, Parameter ( z.B. ;LANGUAGE=de ) bleiben erhalten
+        if (newLocation !== '') {
+          const m = line.match(/^LOCATION(;[^:]*)?:/);
+          if (m) return m[0] + escapeIcsValue(newLocation);
+        }
+        // DESCRIPTION: Wert ersetzen, Parameter bleiben erhalten
+        if (newDescription !== '') {
+          const m = line.match(/^DESCRIPTION(;[^:]*)?:/);
+          if (m) return m[0] + escapeIcsValue(newDescription);
+        }
+        // DTSTAMP aktualisieren, damit Kalenderprogramme den Termin als neuere Version erkennen
+        if (wantChanges && line.startsWith('DTSTAMP:')) {
+          return 'DTSTAMP:' + stamp;
+        }
+        return line;
+      });
+
+      return out.join(eol);
+    }
+
+    // ---------- UI ----------
+
+    document.getElementById('file').addEventListener('change', function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function (ev) {
+        icsContent = ev.target.result;
+        icsFileName = file.name;
+        icsEol = icsContent.includes('\r\n') ? '\r\n' : '\n';
+
+        const events = parseIcs(icsContent, icsEol);
+        const status = document.getElementById('status');
+
+        if (events.length === 0) {
+          status.textContent = 'Keine Termine ( VEVENT ) in der Datei gefunden. Bitte prüfe, ob es sich um eine gültige .ics-Datei handelt.';
+          document.getElementById('termine-container').classList.add('hidden');
+          return;
+        }
+
+        const select = document.getElementById('termine');
+        select.innerHTML = '';
+        events.forEach(function (event, i) {
+          const option = document.createElement('option');
+          option.value = i;
+          const label = (event.start ? event.start : 'ohne Datum') + ' – ' + (event.summary ? event.summary : 'ohne Titel');
+          option.textContent = label;
+          select.appendChild(option);
+        });
+        select.value = '0';
+
+        status.textContent = events.length + ' Termine gefunden. Alle anderen Termine bleiben unverändert.';
+        document.getElementById('termine-container').classList.remove('hidden');
+        document.getElementById('result').classList.add('hidden');
+      };
+      reader.readAsText(file);
+    });
+
     function generateUpdatedIcs() {
-      const fileInput = document.getElementById('file');
-      const file = fileInput.files[0];
-      if (!file) {
-        alert('Bitte lade eine .ics-Datei hoch.');
+      if (!icsContent) {
+        alert('Bitte lade zuerst eine .ics-Datei hoch.');
         return;
       }
-
       const index = document.getElementById('termine').value;
       const location = document.getElementById('location').value.trim();
       const description = document.getElementById('description').value.trim();
 
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        const content = e.target.result;
-        const updatedContent = updateIcsFields(content, index, location, description);
-
-        const blob = new Blob([updatedContent], { type: 'text/calendar' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `updated-${file.name}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        document.getElementById('result').classList.remove('hidden');
-      };
-      reader.readAsText(file);
-    }
-
-    function updateIcsFields(content, index, newLocation, newDescription) {
-      const lines = content.split('\n');
-      let currentIndex = -1;
-      let updatedContent = [];
-
-      for (const line of lines) {
-        if (line.startsWith('BEGIN:VEVENT')) {
-          currentIndex++;
-        }
-        if (currentIndex === parseInt(index)) {
-          if (line.startsWith('LOCATION:') && newLocation) {
-            updatedContent.push(`LOCATION:${newLocation.replace(/,/g, '\\,')}`);
-          } else if (line.startsWith('DESCRIPTION:') && newDescription) {
-            updatedContent.push(`DESCRIPTION:${newDescription}`);
-          } else {
-            updatedContent.push(line);
-          }
-        } else {
-          updatedContent.push(line);
-        }
+      if (location === '' && description === '') {
+        alert('Bitte gib eine neue Location und/oder eine neue Beschreibung ein. Ohne Änderung ist der Download nicht nötig.');
+        return;
       }
-      return updatedContent.join('\n');
+
+      const updated = updateIcsFields(icsContent, icsEol, index, location, description);
+
+      const blob = new Blob([updated], { type: 'text/calendar;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'updated-' + icsFileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      document.getElementById('result').classList.remove('hidden');
     }
   </script>
 </body>
