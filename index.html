@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Kalender-Tool: .ics bearbeiten</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 600px;
+      margin: 20px auto;
+      padding: 20px;
+      background: #f9f9f9;
+    }
+    h1 {
+      color: #0066cc;
+      font-size: 18px;
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin: 10px 0 5px;
+      font-weight: bold;
+    }
+    button, input[type="file"] {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px 0;
+    }
+    button:hover {
+      background: #0052a3;
+    }
+    #result {
+      margin-top: 20px;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: white;
+    }
+    .hidden {
+      display: none;
+    }
+    #termine, #location, #description {
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 15px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Kalender-Tool: .ics bearbeiten</h1>
+  <p>Lade eine .ics-Datei hoch, wähle einen Termin aus und passe beliebige Felder an (z.B. Location, Beschreibung). Die aktualisierte Datei wird als Download bereitgestellt.</p>
+
+  <label for="file">.ics-Datei hochladen:</label>
+  <input type="file" id="file" accept=".ics" required />
+
+  <div id="termine-container" class="hidden">
+    <label for="termine">Termin auswählen:</label>
+    <select id="termine" required>
+      <option value="" disabled selected>— Termin wählen —</option>
+    </select>
+
+    <label for="location">Neue Location (optional):</label>
+    <input type="text" id="location" placeholder="z.B. Gerätehaus, Neue Bahnhofstraße">
+
+    <label for="description">Neue Beschreibung (optional):</label>
+    <input type="text" id="description" placeholder="z.B. Medic-Sonderdienst 2027">
+
+    <button onclick="generateUpdatedIcs()">Aktualisierte .ics generieren & herunterladen</button>
+  </div>
+
+  <div id="result" class="hidden">
+    <p><strong>Fertig!</strong> Die aktualisierte .ics-Datei wurde generiert. Speichere sie und teile sie per WhatsApp oder E-Mail.</p>
+  </div>
+
+  <script>
+    document.getElementById('file').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const content = e.target.result;
+        const events = parseIcs(content);
+
+        const select = document.getElementById('termine');
+        select.innerHTML = '<option value="" disabled selected>— Termin wählen —</option>';
+
+        events.forEach((event, index) => {
+          const option = document.createElement('option');
+          option.value = index;
+          option.textContent = `${event.start} – ${event.summary}`;
+          select.appendChild(option);
+        });
+
+        document.getElementById('termine-container').classList.remove('hidden');
+      };
+      reader.readAsText(file);
+    });
+
+    function parseIcs(content) {
+      const events = [];
+      const lines = content.split('\n');
+      let currentEvent = null;
+
+      for (const line of lines) {
+        if (line.startsWith('BEGIN:VEVENT')) {
+          currentEvent = { start: '', summary: '' };
+        } else if (line.startsWith('DTSTART')) {
+          const match = line.match(/DTSTART;TZID=.*?:(\d{8}T\d{6})/);
+          if (match) {
+            const date = match[1];
+            currentEvent.start = `${date.substring(6,8)}.${date.substring(4,6)}.${date.substring(0,4)}`;
+          }
+        } else if (line.startsWith('SUMMARY:')) {
+          currentEvent.summary = line.substring(8);
+        } else if (line.startsWith('END:VEVENT')) {
+          events.push(currentEvent);
+          currentEvent = null;
+        }
+      }
+      return events;
+    }
+
+    function generateUpdatedIcs() {
+      const fileInput = document.getElementById('file');
+      const file = fileInput.files[0];
+      if (!file) {
+        alert('Bitte lade eine .ics-Datei hoch.');
+        return;
+      }
+
+      const index = document.getElementById('termine').value;
+      const location = document.getElementById('location').value.trim();
+      const description = document.getElementById('description').value.trim();
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const content = e.target.result;
+        const updatedContent = updateIcsFields(content, index, location, description);
+
+        const blob = new Blob([updatedContent], { type: 'text/calendar' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `updated-${file.name}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        document.getElementById('result').classList.remove('hidden');
+      };
+      reader.readAsText(file);
+    }
+
+    function updateIcsFields(content, index, newLocation, newDescription) {
+      const lines = content.split('\n');
+      let currentIndex = -1;
+      let updatedContent = [];
+
+      for (const line of lines) {
+        if (line.startsWith('BEGIN:VEVENT')) {
+          currentIndex++;
+        }
+        if (currentIndex === parseInt(index)) {
+          if (line.startsWith('LOCATION:') && newLocation) {
+            updatedContent.push(`LOCATION:${newLocation.replace(/,/g, '\\,')}`);
+          } else if (line.startsWith('DESCRIPTION:') && newDescription) {
+            updatedContent.push(`DESCRIPTION:${newDescription}`);
+          } else {
+            updatedContent.push(line);
+          }
+        } else {
+          updatedContent.push(line);
+        }
+      }
+      return updatedContent.join('\n');
+    }
+  </script>
+</body>
+</html>
